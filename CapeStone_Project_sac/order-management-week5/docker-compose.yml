@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: orderdb
+      POSTGRES_USER: orderuser
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in your shell or .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orderuser -d orderdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  app:
+    build: .
+    environment:
+      APP_PORT: 8080
+      APP_ENV: development
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: orderdb
+      DB_USER: orderuser
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in your shell or .env}
+      DB_SSLMODE: disable
+      API_KEY: ${API_KEY:-}
+      PRODUCT_SERVICE_URL: ${PRODUCT_SERVICE_URL:-}
+      PRODUCT_TIMEOUT_MS: 2000
+      PRODUCT_RETRIES: 2
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  postgres_data:
