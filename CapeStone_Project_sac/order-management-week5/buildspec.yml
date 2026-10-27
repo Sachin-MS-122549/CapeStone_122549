@@ -1,23 +1,20 @@
 version: 0.2
 
 phases:
-  install:
-    runtime-versions:
-      golang: 1.23
-
   pre_build:
     commands:
-      - go mod download
+      - cd "$CODEBUILD_SRC_DIR/CapeStone_Project_sac/order-management-week5" && go mod download
 
   build:
     commands:
-      - go test ./...
-      - docker build -t order-management:latest .
+      - cd "$CODEBUILD_SRC_DIR/CapeStone_Project_sac/order-management-week5" && go test ./...
+      - cd "$CODEBUILD_SRC_DIR/CapeStone_Project_sac/order-management-week5" && docker build -t order-management:latest .
 
   post_build:
     commands:
-      - docker save order-management:latest -o order-management-image.tar
+      - cd "$CODEBUILD_SRC_DIR/CapeStone_Project_sac/order-management-week5" && docker save order-management:latest -o order-management-image.tar
 
 artifacts:
+  base-directory: CapeStone_Project_sac/order-management-week5
   files:
     - order-management-image.tar
