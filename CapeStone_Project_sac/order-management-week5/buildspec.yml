@@ -1,0 +1,23 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      golang: 1.23
+
+  pre_build:
+    commands:
+      - go mod download
+
+  build:
+    commands:
+      - go test ./...
+      - docker build -t order-management:latest .
+
+  post_build:
+    commands:
+      - docker save order-management:latest -o order-management-image.tar
+
+artifacts:
+  files:
+    - order-management-image.tar

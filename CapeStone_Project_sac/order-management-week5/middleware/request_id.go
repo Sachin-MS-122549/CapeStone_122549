@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"order-management/observability"
 	"strconv"
 	"time"
 
@@ -14,6 +15,7 @@ func RequestID() gin.HandlerFunc {
 			id = strconv.FormatInt(time.Now().UnixNano(), 36)
 		}
 		c.Set("request_id", id)
+		c.Request = c.Request.WithContext(observability.WithRequestID(c.Request.Context(), id))
 		c.Header("X-Request-ID", id)
 		c.Next()
 	}

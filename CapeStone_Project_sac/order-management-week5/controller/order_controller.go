@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"order-management/authn"
 	"order-management/model"
+	"order-management/observability"
+	"order-management/repository"
 	"order-management/service"
 
 	"github.com/gin-gonic/gin"
@@ -31,17 +33,24 @@ func (c *OrderController) Register(r *gin.RouterGroup) {
 	r.POST("/orders", c.Create)
 	r.GET("/orders", c.List)
 	r.GET("/orders/:id", c.Get)
+	r.PUT("/orders/:id/status", c.UpdateStatus)
 	r.PATCH("/orders/:id/status", c.UpdateStatus)
 }
 
 func (c *OrderController) Create(ctx *gin.Context) {
+	observability.Trace(ctx.Request.Context(), "controller", "create_order")
+	principal, ok := authn.FromGin(ctx)
+	if !ok {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
 	var req model.CreateOrderRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 
-	order, err := c.service.Create(ctx.Request.Context(), req)
+	order, err := c.service.Create(ctx.Request.Context(), req, principal)
 	if err != nil {
 		writeOrderError(ctx, err)
 		return
@@ -50,13 +59,19 @@ func (c *OrderController) Create(ctx *gin.Context) {
 }
 
 func (c *OrderController) Get(ctx *gin.Context) {
+	observability.Trace(ctx.Request.Context(), "controller", "get_order")
+	principal, ok := authn.FromGin(ctx)
+	if !ok {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
 	id, err := parseID(ctx.Param("id"))
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid order id"})
 		return
 	}
 
-	order, err := c.service.Get(ctx.Request.Context(), id)
+	order, err := c.service.Get(ctx.Request.Context(), id, principal)
 	if err != nil {
 		writeOrderError(ctx, err)
 		return
@@ -65,6 +80,12 @@ func (c *OrderController) Get(ctx *gin.Context) {
 }
 
 func (c *OrderController) List(ctx *gin.Context) {
+	observability.Trace(ctx.Request.Context(), "controller", "list_orders")
+	principal, ok := authn.FromGin(ctx)
+	if !ok {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
 	limit, err := parseIntQuery(ctx, "limit", 20)
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
@@ -83,7 +104,7 @@ func (c *OrderController) List(ctx *gin.Context) {
 		offset = 0
 	}
 
-	orders, err := c.service.List(ctx.Request.Context(), limit, offset)
+	orders, err := c.service.List(ctx.Request.Context(), limit, offset, principal)
 	if err != nil {
 		writeOrderError(ctx, err)
 		return
@@ -92,6 +113,12 @@ func (c *OrderController) List(ctx *gin.Context) {
 }
 
 func (c *OrderController) UpdateStatus(ctx *gin.Context) {
+	observability.Trace(ctx.Request.Context(), "controller", "update_order_status")
+	principal, ok := authn.FromGin(ctx)
+	if !ok {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
 	id, err := parseID(ctx.Param("id"))
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid order id"})
@@ -104,7 +131,7 @@ func (c *OrderController) UpdateStatus(ctx *gin.Context) {
 		return
 	}
 
-	order, err := c.service.UpdateStatus(ctx.Request.Context(), id, req.Status)
+	order, err := c.service.UpdateStatus(ctx.Request.Context(), id, req.Status, principal)
 	if err != nil {
 		writeOrderError(ctx, err)
 		return
@@ -113,13 +140,18 @@ func (c *OrderController) UpdateStatus(ctx *gin.Context) {
 }
 
 func writeOrderError(ctx *gin.Context, err error) {
+	_ = ctx.Error(err)
 	switch {
+	case errors.Is(err, authn.ErrForbidden):
+		ctx.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 	case errors.Is(err, service.ErrInvalid):
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 	case errors.Is(err, service.ErrProductUnavailable):
 		ctx.JSON(http.StatusBadGateway, gin.H{"error": "product service unavailable"})
-	default:
+	case errors.Is(err, repository.ErrNotFound):
 		ctx.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+	default:
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 	}
 }
 
@@ -141,7 +173,7 @@ type GraphQLRequest struct {
 	Variables map[string]interface{} `json:"variables"`
 }
 
-func RegisterGraphQL(r *gin.Engine, svc *service.OrderService) {
+func RegisterGraphQL(r gin.IRoutes, svc *service.OrderService) {
 	orderType := graphql.NewObject(graphql.ObjectConfig{
 		Name: "Order",
 		Fields: graphql.Fields{
@@ -178,13 +210,21 @@ func RegisterGraphQL(r *gin.Engine, svc *service.OrderService) {
 		Name: "Query",
 		Fields: graphql.Fields{
 			"order": &graphql.Field{Type: orderType, Args: orderArgs, Resolve: func(params graphql.ResolveParams) (interface{}, error) {
+				principal, ok := authn.FromContext(params.Context)
+				if !ok {
+					return nil, authn.ErrForbidden
+				}
 				id, ok := params.Args["id"].(int)
 				if !ok || id <= 0 {
 					return nil, service.ErrInvalid
 				}
-				return svc.Get(context.Background(), int64(id))
+				return svc.Get(params.Context, int64(id), principal)
 			}},
 			"orders": &graphql.Field{Type: graphql.NewList(orderType), Args: listArgs, Resolve: func(params graphql.ResolveParams) (interface{}, error) {
+				principal, ok := authn.FromContext(params.Context)
+				if !ok {
+					return nil, authn.ErrForbidden
+				}
 				limit := 20
 				if v, ok := params.Args["limit"].(int); ok && v > 0 {
 					limit = v
@@ -193,7 +233,7 @@ func RegisterGraphQL(r *gin.Engine, svc *service.OrderService) {
 				if v, ok := params.Args["offset"].(int); ok && v >= 0 {
 					offset = v
 				}
-				return svc.List(context.Background(), limit, offset)
+				return svc.List(params.Context, limit, offset, principal)
 			}},
 		},
 	})
@@ -202,15 +242,23 @@ func RegisterGraphQL(r *gin.Engine, svc *service.OrderService) {
 		Name: "Mutation",
 		Fields: graphql.Fields{
 			"createOrder": &graphql.Field{Type: orderType, Args: createArgs, Resolve: func(params graphql.ResolveParams) (interface{}, error) {
+				principal, ok := authn.FromContext(params.Context)
+				if !ok {
+					return nil, authn.ErrForbidden
+				}
 				customerID, _ := params.Args["customerId"].(int)
 				productID, _ := params.Args["productId"].(int)
 				quantity, _ := params.Args["quantity"].(int)
-				return svc.Create(context.Background(), model.CreateOrderRequest{CustomerID: int64(customerID), ProductID: int64(productID), Quantity: quantity})
+				return svc.Create(params.Context, model.CreateOrderRequest{CustomerID: int64(customerID), ProductID: int64(productID), Quantity: quantity}, principal)
 			}},
 			"updateOrderStatus": &graphql.Field{Type: orderType, Args: updateArgs, Resolve: func(params graphql.ResolveParams) (interface{}, error) {
+				principal, ok := authn.FromContext(params.Context)
+				if !ok {
+					return nil, authn.ErrForbidden
+				}
 				id, _ := params.Args["id"].(int)
 				status, _ := params.Args["status"].(string)
-				return svc.UpdateStatus(context.Background(), int64(id), model.OrderStatus(status))
+				return svc.UpdateStatus(params.Context, int64(id), model.OrderStatus(status), principal)
 			}},
 		},
 	})
@@ -221,6 +269,7 @@ func RegisterGraphQL(r *gin.Engine, svc *service.OrderService) {
 	}
 
 	r.POST("/graphql", func(c *gin.Context) {
+		observability.Trace(c.Request.Context(), "controller", "graphql")
 		var req GraphQLRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"message": "invalid graphql request"}}})
@@ -228,6 +277,7 @@ func RegisterGraphQL(r *gin.Engine, svc *service.OrderService) {
 		}
 		result := graphql.Do(graphql.Params{
 			Schema:         schema,
+			Context:        c.Request.Context(),
 			RequestString:  req.Query,
 			VariableValues: req.Variables,
 		})

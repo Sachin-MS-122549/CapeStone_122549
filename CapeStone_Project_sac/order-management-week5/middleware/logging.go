@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"order-management/observability"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -65,6 +67,7 @@ func (m *metricsStore) Snapshot() string {
 		sb.WriteString(fmt.Sprintf("http_request_duration_seconds_sum{method=%q,path=%q} %0.6f\n", parts[0], parts[1], summary.total))
 	}
 	sb.WriteString(fmt.Sprintf("http_errors_total %d\n", m.errorsTotal))
+	sb.WriteString(fmt.Sprintf("database_errors_total %d\n", observability.DatabaseErrorCount()))
 	return sb.String()
 }
 
@@ -83,7 +86,17 @@ func AccessLog() gin.HandlerFunc {
 		start := time.Now()
 		c.Next()
 		duration := time.Since(start)
-		log.Printf("request_id=%s method=%s path=%s status=%d duration=%s", c.GetString("request_id"), c.Request.Method, c.Request.URL.Path, c.Writer.Status(), duration)
+		path := c.FullPath()
+		if path == "" {
+			path = c.Request.URL.Path
+		}
+		errorMessage := "-"
+		if len(c.Errors) > 0 {
+			errorMessage = c.Errors.String()
+		} else if c.Writer.Status() >= http.StatusBadRequest {
+			errorMessage = http.StatusText(c.Writer.Status())
+		}
+		log.Printf("request_id=%s method=%s path=%s status=%d duration=%s error=%q", c.GetString("request_id"), c.Request.Method, path, c.Writer.Status(), duration, errorMessage)
 	}
 }
 
@@ -109,14 +122,4 @@ func MetricsHandler() gin.HandlerFunc {
 
 func PrometheusHandler() gin.HandlerFunc {
 	return MetricsHandler()
-}
-
-func APIKeyAuth(expected string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if c.GetHeader("X-API-Key") != expected {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-			return
-		}
-		c.Next()
-	}
 }

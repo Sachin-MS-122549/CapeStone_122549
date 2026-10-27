@@ -8,75 +8,109 @@ import (
 	"time"
 
 	"order-management/model"
+	"order-management/observability"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var ErrNotFound = errors.New("order not found")
 
 type OrderRepository interface {
 	Create(context.Context, model.Order) (model.Order, error)
-	Get(context.Context, int64) (model.Order, error)
-	List(context.Context, int, int) ([]model.Order, error)
-	UpdateStatus(context.Context, int64, model.OrderStatus) (model.Order, error)
+	Get(context.Context, int64, *int64) (model.Order, error)
+	List(context.Context, int, int, *int64) ([]model.Order, error)
+	UpdateStatus(context.Context, int64, model.OrderStatus, *int64) (model.Order, error)
 	Ping(context.Context) error
 }
 
-type PostgresRepository struct{ db *pgxpool.Pool }
-
-func NewPostgresRepository(db *pgxpool.Pool) *PostgresRepository { return &PostgresRepository{db: db} }
-func (r *PostgresRepository) Ping(ctx context.Context) error     { return r.db.Ping(ctx) }
-func (r *PostgresRepository) Create(ctx context.Context, o model.Order) (model.Order, error) {
-	err := r.db.QueryRow(ctx, `INSERT INTO orders(customer_id,product_id,quantity,unit_price,total_amount,status) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,created_at,updated_at`,
-		o.CustomerID, o.ProductID, o.Quantity, o.UnitPrice, o.TotalAmount, o.Status).Scan(&o.ID, &o.CreatedAt, &o.UpdatedAt)
-	return o, err
+type GormOrderRepository struct {
+	db *gorm.DB
 }
 
-const orderColumns = `id,customer_id,product_id,quantity,unit_price,total_amount,status,created_at,updated_at`
-
-func scanOrder(row interface{ Scan(...any) error }) (model.Order, error) {
-	var o model.Order
-	err := row.Scan(&o.ID, &o.CustomerID, &o.ProductID, &o.Quantity, &o.UnitPrice, &o.TotalAmount, &o.Status, &o.CreatedAt, &o.UpdatedAt)
-	return o, err
+func NewGormOrderRepository(db *gorm.DB) *GormOrderRepository {
+	return &GormOrderRepository{db: db}
 }
-func (r *PostgresRepository) Get(ctx context.Context, id int64) (model.Order, error) {
-	o, err := scanOrder(r.db.QueryRow(ctx, `SELECT `+orderColumns+` FROM orders WHERE id=$1`, id))
-	if err != nil {
-		if err.Error() == "no rows in result set" {
-			return o, ErrNotFound
-		}
-		return o, err
+
+func (r *GormOrderRepository) Ping(ctx context.Context) error {
+	observability.Trace(ctx, "repository", "ping")
+	observability.Trace(ctx, "postgres", "ping")
+	sqlDB, err := r.db.DB()
+	if err == nil {
+		err = sqlDB.PingContext(ctx)
 	}
-	return o, nil
-}
-func (r *PostgresRepository) List(ctx context.Context, limit, offset int) ([]model.Order, error) {
-	rows, err := r.db.Query(ctx, `SELECT `+orderColumns+` FROM orders ORDER BY id DESC LIMIT $1 OFFSET $2`, limit, offset)
 	if err != nil {
+		observability.RecordDatabaseError()
+	}
+	return err
+}
+
+func (r *GormOrderRepository) Create(ctx context.Context, order model.Order) (model.Order, error) {
+	observability.Trace(ctx, "repository", "create_order")
+	observability.Trace(ctx, "postgres", "insert_order")
+	if err := r.db.WithContext(ctx).Create(&order).Error; err != nil {
+		observability.RecordDatabaseError()
+		return model.Order{}, err
+	}
+	return order, nil
+}
+
+func (r *GormOrderRepository) Get(ctx context.Context, id int64, customerID *int64) (model.Order, error) {
+	observability.Trace(ctx, "repository", "get_order")
+	observability.Trace(ctx, "postgres", "select_order")
+	query := r.db.WithContext(ctx)
+	if customerID != nil {
+		query = query.Where("customer_id = ?", *customerID)
+	}
+	var order model.Order
+	err := query.First(&order, id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return order, ErrNotFound
+	}
+	if err != nil {
+		observability.RecordDatabaseError()
+		return order, err
+	}
+	return order, nil
+}
+
+func (r *GormOrderRepository) List(ctx context.Context, limit, offset int, customerID *int64) ([]model.Order, error) {
+	observability.Trace(ctx, "repository", "list_orders")
+	observability.Trace(ctx, "postgres", "select_orders")
+	query := r.db.WithContext(ctx)
+	if customerID != nil {
+		query = query.Where("customer_id = ?", *customerID)
+	}
+	var orders []model.Order
+	if err := query.Order("id DESC").Limit(limit).Offset(offset).Find(&orders).Error; err != nil {
+		observability.RecordDatabaseError()
 		return nil, err
 	}
-	defer rows.Close()
-	out := make([]model.Order, 0)
-	for rows.Next() {
-		o, e := scanOrder(rows)
-		if e != nil {
-			return nil, e
-		}
-		out = append(out, o)
-	}
-	return out, rows.Err()
-}
-func (r *PostgresRepository) UpdateStatus(ctx context.Context, id int64, s model.OrderStatus) (model.Order, error) {
-	o, err := scanOrder(r.db.QueryRow(ctx, `UPDATE orders SET status=$1,updated_at=NOW() WHERE id=$2 RETURNING `+orderColumns, s, id))
-	if err != nil {
-		if err.Error() == "no rows in result set" {
-			return o, ErrNotFound
-		}
-		return o, err
-	}
-	return o, nil
+	return orders, nil
 }
 
-// MemoryRepository makes the project usable locally without PostgreSQL. Use PostgreSQL for persistence.
+func (r *GormOrderRepository) UpdateStatus(ctx context.Context, id int64, status model.OrderStatus, customerID *int64) (model.Order, error) {
+	observability.Trace(ctx, "repository", "update_order_status")
+	observability.Trace(ctx, "postgres", "update_order_status")
+	var order model.Order
+	query := r.db.WithContext(ctx).Model(&order).Where("id = ?", id)
+	if customerID != nil {
+		query = query.Where("customer_id = ?", *customerID)
+	}
+	result := query.Clauses(clause.Returning{}).Updates(map[string]any{
+		"status":     status,
+		"updated_at": time.Now().UTC(),
+	})
+	if result.Error != nil {
+		observability.RecordDatabaseError()
+		return model.Order{}, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return model.Order{}, ErrNotFound
+	}
+	return order, nil
+}
+
 type MemoryRepository struct {
 	mu     sync.RWMutex
 	orders map[int64]model.Order
@@ -86,50 +120,64 @@ type MemoryRepository struct {
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{orders: map[int64]model.Order{}, nextID: 1}
 }
-func (r *MemoryRepository) Ping(context.Context) error { return nil }
-func (r *MemoryRepository) Create(_ context.Context, o model.Order) (model.Order, error) {
+
+func (r *MemoryRepository) Ping(ctx context.Context) error {
+	observability.Trace(ctx, "repository", "ping")
+	return nil
+}
+
+func (r *MemoryRepository) Create(ctx context.Context, order model.Order) (model.Order, error) {
+	observability.Trace(ctx, "repository", "create_order")
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now().UTC()
-	o.ID = r.nextID
+	order.ID = r.nextID
 	r.nextID++
-	o.CreatedAt = now
-	o.UpdatedAt = now
-	r.orders[o.ID] = o
-	return o, nil
+	order.CreatedAt = now
+	order.UpdatedAt = now
+	r.orders[order.ID] = order
+	return order, nil
 }
-func (r *MemoryRepository) Get(_ context.Context, id int64) (model.Order, error) {
+
+func (r *MemoryRepository) Get(ctx context.Context, id int64, customerID *int64) (model.Order, error) {
+	observability.Trace(ctx, "repository", "get_order")
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	o, ok := r.orders[id]
-	if !ok {
-		return o, ErrNotFound
+	order, ok := r.orders[id]
+	if !ok || (customerID != nil && order.CustomerID != *customerID) {
+		return order, ErrNotFound
 	}
-	return o, nil
+	return order, nil
 }
-func (r *MemoryRepository) List(_ context.Context, limit, offset int) ([]model.Order, error) {
+
+func (r *MemoryRepository) List(ctx context.Context, limit, offset int, customerID *int64) ([]model.Order, error) {
+	observability.Trace(ctx, "repository", "list_orders")
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	ids := make([]int64, 0, len(r.orders))
-	for id := range r.orders {
-		ids = append(ids, id)
+	for id, order := range r.orders {
+		if customerID == nil || order.CustomerID == *customerID {
+			ids = append(ids, id)
+		}
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] > ids[j] })
-	out := make([]model.Order, 0)
+	out := make([]model.Order, 0, limit)
 	for i := offset; i < len(ids) && len(out) < limit; i++ {
 		out = append(out, r.orders[ids[i]])
 	}
 	return out, nil
 }
-func (r *MemoryRepository) UpdateStatus(_ context.Context, id int64, s model.OrderStatus) (model.Order, error) {
+
+func (r *MemoryRepository) UpdateStatus(ctx context.Context, id int64, status model.OrderStatus, customerID *int64) (model.Order, error) {
+	observability.Trace(ctx, "repository", "update_order_status")
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	o, ok := r.orders[id]
-	if !ok {
-		return o, ErrNotFound
+	order, ok := r.orders[id]
+	if !ok || (customerID != nil && order.CustomerID != *customerID) {
+		return order, ErrNotFound
 	}
-	o.Status = s
-	o.UpdatedAt = time.Now().UTC()
-	r.orders[id] = o
-	return o, nil
+	order.Status = status
+	order.UpdatedAt = time.Now().UTC()
+	r.orders[id] = order
+	return order, nil
 }
