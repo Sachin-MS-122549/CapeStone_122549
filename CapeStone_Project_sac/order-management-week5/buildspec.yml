@@ -1,5 +1,9 @@
 version: 0.2
 
+env:
+  variables:
+    GOCACHE: /tmp/go-build-cache
+
 phases:
   pre_build:
     commands:
