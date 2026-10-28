@@ -196,6 +196,10 @@ docker compose up --build
 
 The Gateway is available at `http://localhost:8080`, Auth at `http://localhost:8083`, Product at `http://localhost:8082`, and Consul UI at `http://localhost:8500/ui/`. Stop the stack with `docker compose down`; add `-v` only if you intentionally want to delete the persisted local database volume.
 
+## Elastic Beanstalk Procfile
+
+The root `Procfile` starts the API Gateway as Elastic Beanstalk's `web` process. CodeBuild compiles that service to the root-level `application` executable and includes both files in the build artifact. Configure the Elastic Beanstalk environment with `APP_ENV=production`, `APP_PORT=5000`, a strong `JWT_SECRET`, `CONSUL_HTTP_ADDR`, and a reachable `SERVICE_ADDRESS`. The Auth, Order, and Product services must be deployed and reachable separately; this Procfile only starts the Gateway.
+
 ## Metrics
 
 Each service process exposes a Prometheus-styled metrics endpoint at `/metrics` without requiring local Prometheus or Grafana. The endpoint returns text metrics like:
