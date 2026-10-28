@@ -231,6 +231,16 @@ The PostgreSQL repository uses a shared `pgxpool.Pool`; PostgreSQL statements us
 
 `go test ./...` includes a test that submits 100 concurrent order-create requests against the thread-safe in-memory repository and verifies all requests succeed with unique IDs. To check for data races, run `go test -race ./...` in an environment with cgo and a C compiler installed.
 
+## Tests and CodeBuild
+
+Run all tests locally with:
+
+```bash
+go test -v ./...
+```
+
+The verbose output lists individual test cases for JWT authentication, GraphQL order operations and customer isolation, Auth and Product input/authorization checks, database configuration validation, password-hash JSON protection, repository customer scoping, Consul registration configuration, and concurrent order creation. CodeBuild uses the same command so the test names and results appear in its build logs. Go packages containing only service entrypoints or simple wiring may still display `[no test files]`; the overall build compiles those packages, while behavior is tested in the packages they call.
+
 ## Health checks
 
 - `GET /health/live`
